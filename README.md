@@ -219,7 +219,7 @@ password-manager/
 * La gestion des sessions est sécurisée et temporaire.
 
 ## Auteurs
-
+```bash
 * Hasna Daoui
 * Nana Diawara
 

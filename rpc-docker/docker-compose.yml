@@ -1,0 +1,37 @@
+version: "3.3"
+
+services:
+  server:
+    build:
+      context: ./server
+      dockerfile: Dockerfile.server
+    ports:
+      - "8443:8443"
+    volumes:
+      - ./data:/app/data
+      - /tmp/.X11-unix:/tmp/.X11-unix
+    environment:
+      - DB_URL=jdbc:sqlite:/app/data/password_manager.db
+      - DISPLAY=${DISPLAY}
+    networks:
+      - password-manager-net
+    tty: true
+
+  client:
+    build:
+      context: ./client
+      dockerfile: Dockerfile.client
+    depends_on:
+      - server
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix
+    environment:
+      - DISPLAY=${DISPLAY}
+    networks:
+      - password-manager-net
+    tty: true
+
+networks:
+  password-manager-net:
+    driver: bridge
+

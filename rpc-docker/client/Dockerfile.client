@@ -1,0 +1,23 @@
+FROM openjdk:17-jdk-slim
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y \
+    libfreetype6 \
+    libxext6 \
+    libxrender1 \
+    libxtst6 \
+    libxi6 \
+    libxrandr2 \
+    libxinerama1 \
+    libx11-6 \
+    fontconfig \
+    fonts-dejavu-core \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY . /app
+
+RUN javac -cp "gson-2.10.1.jar:sqlite-jdbc-3.42.0.0.jar" PasswordManagerClient.java
+
+CMD ["java", "-cp", ".:gson-2.10.1.jar:sqlite-jdbc-3.42.0.0.jar", "PasswordManagerClient"]
+

@@ -1,0 +1,40 @@
+.tablehead{
+ background-color: #003399;
+ 
+ }
+ 
+ .th2{
+	 width:75%; 
+	 align-items:center; 
+     color:white;
+	 }
+.titles{
+	color:#2f75d1;
+    }
+.img1{
+	width:100px;
+	height:70px;
+}
+.img2{
+	 width:160px ;
+	 height:220px;
+}
+.thin-raw1{
+	background-color:#8d918d;
+}
+.thin-raw{
+	background-color:#4fa209;
+}
+
+table{
+	 border:0px;
+	 width:550px;
+	 height:340px;
+}
+.imgback{
+	background-image: url("image.png");
+height: 300px;
+width: 200px;
+
+
+}

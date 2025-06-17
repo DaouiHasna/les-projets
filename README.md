@@ -272,7 +272,8 @@ curl -O https://repo1.maven.org/maven2/org/xerial/sqlite-jdbc/3.42.0.0/sqlite-jd
 
 Utilise OpenSSL pour créer le certificat et le keystore. Exécute les commandes suivantes et place le fichier keystore.p12 dans le dossier server/ :
 
-bash
+
+```bash
 openssl req -x509 -newkey rsa:2048 -keyout server.key -out server.crt \
   -days 365 -nodes \
   -subj "/C=MA/ST=Taroudant/L=Kchachda/O=CyberSecurity/OU=LocalDev/CN=172.16.101.128"
@@ -280,6 +281,7 @@ openssl req -x509 -newkey rsa:2048 -keyout server.key -out server.crt \
 openssl pkcs12 -export -inkey server.key -in server.crt \
   -out keystore.p12 -name server
 
+```
 ### 3. Compilation et Exécution
 
 #### a) Compilation

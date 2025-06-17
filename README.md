@@ -263,10 +263,10 @@ password-manager-rmi/
 
 Exécute les commandes suivantes et place les fichiers JAR dans les dossiers client/ et server/ :
 
-bash
+```bash
 
 curl -O https://repo1.maven.org/maven2/org/xerial/sqlite-jdbc/3.42.0.0/sqlite-jdbc-3.42.0.0.jar
-
+```
 
 ###  2.Générer le keystore SSL (PKCS12)
 

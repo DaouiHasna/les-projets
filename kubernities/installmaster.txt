@@ -1,0 +1,292 @@
+#!/bin/bash
+
+# Fonction pour exécuter une commande critique avec retry
+run_with_retry() {
+  local cmd="$1"
+  local description="$2"
+
+  until eval "$cmd"; do
+    echo "❌ Erreur lors de : $description"
+    echo "💡 Veuillez corriger le problème puis appuyez sur Entrée pour réessayer, ou Ctrl+C pour quitter."
+    read -r
+  done
+  echo "✅ Étape réussie : $description"
+}
+
+wait_for_disk() {
+  local disk=$1
+  echo "⏳ Attente du disque $disk..."
+
+  until [ -b "$disk" ]; do
+    echo "Disque $disk non trouvé, attente 5s..."
+    sleep 5
+  done
+
+  echo "✅ Disque $disk trouvé."
+}
+
+wait_for_operator_ready() {
+  echo "⏳ Attente que le pod rook-ceph-operator soit en état Running..."
+
+  for i in {1..30}; do
+    STATUS=$(kubectl -n rook-ceph get pod -l app=rook-ceph-operator -o jsonpath="{.items[0].status.phase}" 2>/dev/null || echo "")
+    IMAGE_ERR=$(kubectl -n rook-ceph get pod -l app=rook-ceph-operator -o jsonpath="{.items[0].status.containerStatuses[0].state.waiting.reason}" 2>/dev/null || echo "")
+
+    if [[ "$STATUS" == "Running" ]]; then
+      echo "✅ L'opérateur Rook Ceph est prêt."
+      return 0
+    elif [[ "$IMAGE_ERR" == "ImagePullBackOff" || "$IMAGE_ERR" == "ErrImagePull" ]]; then
+      echo "❌ Échec : impossible de récupérer l'image du pod rook-ceph-operator."
+      echo "💡 Astuce : vérifie que l'image est correcte dans operator.yaml"
+      return 1
+    else
+      echo "⌛ En attente... (état actuel: $STATUS)"
+      sleep 10
+    fi
+  done
+
+  echo "❌ Timeout : le pod rook-ceph-operator n'a pas atteint l'état Running."
+  return 1
+}
+wait_for_pods_ready() {
+  namespace=$1
+  timeout=${2:-600}  # timeout 10 minutes par défaut
+  interval=10
+
+  echo "⏳ Attente que tous les pods dans le namespace '$namespace' soient en état Ready..."
+
+  elapsed=0
+  while true; do
+    # Vérifier les pods qui ne sont pas Ready
+    not_ready=$(kubectl get pods -n "$namespace" --no-headers | grep -v 'Running' | grep -v 'Completed' | wc -l)
+    
+    # Alternativement, on peut aussi vérifier le champ Ready via jsonpath
+    not_ready_count=$(kubectl get pods -n "$namespace" -o jsonpath='{range .items[]}{.metadata.name}{" "}{range .status.conditions[]}{.type}{"="}{.status}{" "}{end}{"\n"}{end}' \
+    | grep -v 'Ready=True' | wc -l)
+
+    if [ "$not_ready" -eq 0 ]; then
+      echo "✅ Tous les pods sont Running et Ready."
+      break
+    fi
+
+    if [ "$elapsed" -ge "$timeout" ]; then
+      echo "⚠️ Timeout atteint, certains pods ne sont toujours pas prêts :"
+      kubectl get pods -n "$namespace"
+      exit 1
+    fi
+
+    echo "⚠️ Il reste $not_ready pods non prêts. Nouvelle vérification dans $interval secondes..."
+    sleep "$interval"
+    elapsed=$((elapsed + interval))
+  done
+}
+
+
+echo "🚀 Mise à jour du système..."
+run_with_retry "sudo apt update && sudo apt upgrade -y" "mise à jour du système"
+
+echo "📦 Installation des paquets nécessaires..."
+run_with_retry "sudo apt install -y curl apt-transport-https ca-certificates software-properties-common gnupg git conntrack ethtool" "installation des paquets"
+
+echo "🔑 Ajout de la clé GPG pour Docker..."
+run_with_retry "curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg" "ajout clé GPG Docker"
+
+echo "📝 Ajout du dépôt Docker..."
+echo \
+  "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu \
+  $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+echo "🔄 Mise à jour des paquets avec Docker..."
+sudo apt update
+
+echo "🐳 Installation de Docker CE et Containerd..."
+run_with_retry "sudo apt install -y docker-ce docker-ce-cli containerd.io"
+
+echo "⚙️ Configuration de Containerd..."
+sudo swapoff -a
+sudo sed -i '/ swap / s/^\(.*\)$/#\1/g' /etc/fstab
+
+run_with_retry "sudo tee /etc/modules-load.d/containerd.conf <<EOF
+overlay
+br_netfilter
+EOF"
+
+sudo modprobe overlay
+sudo modprobe br_netfilter
+
+sudo tee /etc/sysctl.d/kubernetes.conf <<EOF
+net.bridge.bridge-nf-call-ip6tables = 1
+net.bridge.bridge-nf-call-iptables = 1
+net.ipv4.ip_forward = 1
+EOF
+
+echo "🔁 Application de la configuration sysctl..."
+sudo sysctl --system
+
+echo "🛠️ Génération du fichier de config Containerd..."
+sudo mkdir -p /etc/containerd
+run_with_retry "sudo containerd config default | sudo tee /etc/containerd/config.toml > /dev/null"
+run_with_retry "sudo sed -i 's/SystemdCgroup = false/SystemdCgroup = true/g' /etc/containerd/config.toml"
+
+echo "🔄 Redémarrage de Containerd..."
+sudo systemctl restart containerd
+sudo systemctl enable containerd
+
+echo "🔑 Ajout du dépôt Kubernetes..."
+sudo mkdir -p /etc/apt/keyrings
+run_with_retry "curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.30/deb/Release.key | sudo gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg"
+echo "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.30/deb/ /" | sudo tee /etc/apt/sources.list.d/kubernetes.list
+
+echo "🔄 Mise à jour des paquets..."
+sudo apt update
+
+echo "📥 Installation de kubelet, kubeadm, kubectl..."
+run_with_retry "sudo apt install -y kubelet kubeadm kubectl"
+sudo apt-mark hold kubelet kubeadm kubectl
+
+
+echo "🚧 Initialisation du cluster Kubernetes..."
+run_with_retry "sudo kubeadm init --pod-network-cidr=192.168.0.0/16 || { echo '❌ Échec de l''initialisation de kubeadm.'; exit 1; }"
+
+echo "🔐 Configuration de l'accès kubectl pour l'utilisateur actuel..."
+mkdir -p $HOME/.kube
+sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
+sudo chown $(id -u):$(id -g) $HOME/.kube/config
+
+echo "🌐 Déploiement du réseau Calico (CNI)..."
+run_with_retry "kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/v3.25.0/manifests/calico.yaml || { echo '❌ Échec du déploiement de Calico.'; exit 1; }"
+
+echo "⚠️ Suppression du taint sur le nœud master pour y permettre l'exécution de pods..."
+run_with_retry "kubectl taint nodes --all node-role.kubernetes.io/control-plane- 2>/dev/null || true"
+
+
+
+echo "🔑 Création d'un token d'accès pour rejoindre des nœuds workers..."
+JOIN_COMMAND=$(kubeadm token create --print-join-command)
+echo "💡 Pour ajouter des nœuds workers, exécutez cette commande sur le worker :"
+echo "$JOIN_COMMAND"
+
+
+echo "📦 Déploiement de Rook Ceph..."
+run_with_retry "git clone https://github.com/rook/rook.git" "clonage du repo rook"
+
+cd rook/deploy/examples || { echo "❌ Impossible de changer de répertoire rook/deploy/examples"; exit 1; }
+
+wait_for_disk "/dev/sdb"
+
+run_with_retry "kubectl apply -f crds.yaml -f common.yaml -f operator.yaml" "application CRDs et operator Rook Ceph"
+
+echo "⏳ Attente du déploiement de l'opérateur Rook Ceph..."
+until wait_for_operator_ready; do
+  echo "⏳ Tentative de redéploiement operator..."
+  run_with_retry "kubectl apply -f operator.yaml" "redéploiement operator rook-ceph"
+done
+
+echo "⏳ Attente du déploiement de l'opérateur Rook Ceph..."
+wait_for_operator_ready || exit 1
+
+kubectl -n rook-ceph rollout status deployment/rook-ceph-operator --timeout=120s
+
+echo "⏳ Attente du namespace rook-ceph..."
+until kubectl get namespace rook-ceph; do
+  echo "Attente du namespace rook-ceph..."
+  sleep 3
+done
+
+echo "⏳ Vérification de la présence du CRD CephCluster..."
+until kubectl get crd cephclusters.ceph.rook.io; do
+  echo "Attente du CRD CephCluster..."
+  sleep 5
+done
+
+echo "📦 Création du cluster Ceph..."
+kubectl apply -f cluster.yaml
+
+echo "⏳ Attente des pods Ceph prêts..."
+#kubectl -n rook-ceph wait --for=condition=Ready pod --all --timeout=400s
+echo "⏳ Attente que tous les pods rook-ceph soient prêts..."
+
+while true; do
+  not_ready=$(kubectl -n rook-ceph get pods --no-headers | grep -v "Running\|Completed" | wc -l)
+  if [ "$not_ready" -eq 0 ]; then
+    echo "✅ Tous les pods sont prêts !"
+    break
+  fi
+  echo "⏳ Certains pods ne sont pas prêts, attente de 5 secondes..."
+  sleep 5
+done
+
+
+echo "📁 Création du filesystem Ceph..."
+kubectl apply -f filesystem.yaml
+
+echo "📦 Création du StorageClass CephFS..."
+kubectl -n rook-ceph apply -f csi/cephfs/storageclass.yaml
+
+echo "🔧 Passage du StorageClass 'rook-ceph-block' en défaut..."
+#kubectl patch sc rook-ceph-block -p '{"metadata":{"storageclass.kubernetes.io/is-default-class":"true"}}'
+echo "📦 Création du StorageClass rook-ceph-block..."
+
+cat <<EOF | kubectl apply -f -
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: rook-ceph-block
+provisioner: rook-ceph.rbd.csi.ceph.com
+parameters:
+  clusterID: rook-ceph
+  pool: replicapool
+  imageFeatures: layering
+  csi.storage.k8s.io/fstype: xfs
+reclaimPolicy: Delete
+allowVolumeExpansion: true
+volumeBindingMode: WaitForFirstConsumer
+EOF
+
+kubectl patch storageclass rook-ceph-block -p '{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}'
+
+
+# Par exemple pour Kubeflow:
+cd ../../.. || exit 1
+echo "📦 Déploiement de Kubeflow..."
+
+run_with_retry "git clone https://github.com/kubeflow/manifests.git" "clonage Kubeflow manifests"
+cd manifests || exit 1
+
+# Installer kustomize si besoin
+if ! command -v kustomize &> /dev/null; then
+  echo "⚙️ Installation de kustomize..."
+  if command -v snap &> /dev/null; then
+    run_with_retry "sudo snap install kustomize" "installation de kustomize via snap"
+  else
+    echo "⚠️ Snap non disponible, utilisation de kubectl kustomize"
+    alias kustomize="kubectl kustomize"
+  fi
+fi
+
+# Vérifier que yq est disponible
+if ! command -v yq &> /dev/null; then
+  echo "⚙️ Installation de yq..."
+  if command -v snap &> /dev/null; then
+    run_with_retry "sudo snap install yq" "installation de yq via snap"
+  elif command -v brew &> /dev/null; then
+    run_with_retry "brew install yq" "installation de yq via brew"
+  else
+    echo "❌ Impossible d'installer yq automatiquement. Veuillez l'installer manuellement."
+    exit 1
+  fi
+fi
+
+# Appliquer les manifests sans annotation trop volumineuse
+#run_with_retry "kustomize build example | yq 'del(.metadata.annotations)' | kubectl apply -f -" "application manifests Kubeflow sans annotations"
+
+
+
+kustomize build common/kubeflow-namespace/base | yq 'del(.metadata.annotations)' | kubectl apply -f -
+
+
+wait_for_pods "kubeflow"
+echo "✅ Installation complète terminée !"
+
+# Port forward (non bloquant)
+kubectl -n istio-system port-forward svc/istio-ingressgateway 8080:80 &

@@ -1,0 +1,19 @@
+{
+  "vcenter": {
+    "host": "10.11.5.83",
+    "username": "administrator@vsphere.local",
+    "password": "Cyber@2025",
+    "port": 443
+  },
+  "vm": {
+    "name": "WebServer-01",
+    "template": "vm1",
+    "datacenter": "Datacenter",
+    "datastore": "datastore1",
+    "cpu": 2,
+    "memory_mb": 4096,
+    "disk_gb": 20,
+    "network": "vlan_100",
+    "power_on": true
+  }
+}
